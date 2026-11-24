@@ -1,0 +1,35 @@
+{
+  "name": "@weblancaster/harness-code-mode",
+  "version": "0.1.0",
+  "description": "Universal async JavaScript Code Mode for Hermes, Pi, Codex, Claude Code, and any MCP harness",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "codemode-mcp": "./adapters/mcp/cli.js"
+  },
+  "exports": {
+    "./core": "./core/session.js",
+    "./catalog": "./core/catalog.js",
+    "./pi": "./adapters/pi/index.ts",
+    "./mcp": "./adapters/mcp/server.js"
+  },
+  "pi": {
+    "extensions": ["./adapters/pi/index.ts"],
+    "skills": ["./skills/code-mode"]
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "code-mode",
+    "mcp",
+    "hermes",
+    "pi",
+    "codex",
+    "claude-code",
+    "sandbox"
+  ]
+}

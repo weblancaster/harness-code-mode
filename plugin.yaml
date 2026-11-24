@@ -1,0 +1,81 @@
+name: code-mode
+label: Code Mode
+version: "0.1.0"
+manifest_version: 2
+api_version: 1
+kind: standalone
+description: >-
+  Universal async JavaScript Code Mode for Hermes Agent (also ships native Pi
+  extension and stdio MCP server for Codex / Claude Code / Cursor). Runs a
+  persistent per-session Node.js sandbox with Promise.all tool dispatch, Claude
+  Code-style $, read, edit, grep, and glob helpers, and BM25 searchTools().
+author: Michael Lancaster
+license: MIT
+homepage: https://github.com/weblancaster/harness-code-mode
+tags: [tools, mcp, sandbox, orchestration, code-mode, token-saving]
+requires_hermes: ">=0.23.0"
+provides_tools:
+  - codemode
+provides_hooks:
+  - on_session_finalize
+  - on_session_reset
+  - agent_loop_stopped
+  - subagent_stop
+config_schema:
+  extra_tools:
+    type: list
+    label: Exposed built-in tools
+    default:
+      - terminal
+      - read_file
+      - write_file
+      - patch
+      - search_files
+      - web_search
+      - web_extract
+    description: Non-MCP Hermes tools exposed in Code Mode (all mcp__* tools are always exposed).
+  timeout_s:
+    type: int
+    label: Default timeout (seconds)
+    default: 60
+    description: Default per-execution wall-clock timeout in seconds (hard max 600).
+  memory_mb:
+    type: int
+    label: V8 heap limit (MB)
+    default: 256
+    description: Max Node.js V8 old-space memory per session worker in MB.
+  max_tool_calls:
+    type: int
+    label: Max tool calls per run
+    default: 200
+    description: Maximum number of Hermes tool dispatches allowed per codemode call.
+  max_concurrency:
+    type: int
+    label: Max parallel tool calls
+    default: 8
+    description: Maximum concurrent tool calls for Promise.all batches (set 1 for serial).
+  max_sessions:
+    type: int
+    label: Max live session workers
+    default: 16
+    description: LRU cap on concurrent idle/active Node.js session workers.
+  idle_ttl_s:
+    type: int
+    label: Idle worker TTL (seconds)
+    default: 1800
+    description: Reap idle session workers after this many seconds of inactivity.
+  max_result_chars:
+    type: int
+    label: Max returned chars
+    default: 50000
+    description: Character cap on serialized return payload before truncation.
+  node_binary:
+    type: str
+    label: Node.js binary override
+    default: ""
+    description: Optional absolute path to node binary. Defaults to Hermes-bundled node, then PATH.
+  prompt_guidance:
+    type: bool
+    label: Inject system prompt guidance
+    default: true
+    description: Register a cache-safe system prompt section explaining when and how to use codemode.
