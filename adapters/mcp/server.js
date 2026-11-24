@@ -76,6 +76,7 @@ export class McpServer {
     this.sessionId = sessionId;
     this.onClose = onClose;
     this._rl = null;
+    this._inflight = new Set();
   }
 
   _write(obj) {
@@ -195,16 +196,21 @@ export class McpServer {
       } catch {
         return;
       }
-      this._handle(msg).catch((err) => {
-        if (msg && msg.id !== undefined) {
-          this._err(msg.id, -32603, String(err && err.message ? err.message : err));
-        }
-      });
+      const task = this._handle(msg)
+        .catch((err) => {
+          if (msg && msg.id !== undefined) {
+            this._err(msg.id, -32603, String(err && err.message ? err.message : err));
+          }
+        })
+        .finally(() => {
+          this._inflight.delete(task);
+        });
+      this._inflight.add(task);
     });
     this._rl.on("close", () => {
-      if (this.onClose) {
-        Promise.resolve(this.onClose()).finally(() => process.exit(0));
-      }
+      Promise.allSettled(Array.from(this._inflight))
+        .then(() => (this.onClose ? Promise.resolve(this.onClose()) : undefined))
+        .finally(() => process.exit(0));
     });
   }
 }

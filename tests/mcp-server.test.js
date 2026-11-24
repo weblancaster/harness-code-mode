@@ -173,3 +173,36 @@ test("MCP server with --allow-local-tools runs workspace helpers and handles can
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test("MCP server drains in-flight tools/call when stdin hits EOF immediately after batch", async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "cm-mcp-eof-"));
+  fs.writeFileSync(path.join(ws, "a.txt"), "line1\nline2\n");
+  try {
+    const proc = spawn(process.execPath, [CLI_PATH, "--allow-local-tools", "--workspace", ws], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let out = "";
+    proc.stdout.on("data", (d) => { out += d.toString(); });
+    proc.stdin.end(
+      [
+        JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } }),
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: { name: "codemode", arguments: { code: 'return (await read("a.txt")).total_lines;' } },
+        }),
+      ].join("\n") + "\n",
+    );
+    const code = await new Promise((resolve) => proc.once("exit", resolve));
+    assert.equal(code, 0);
+    const msgs = out.trim().split("\n").map((l) => JSON.parse(l));
+    const callResp = msgs.find((m) => m.id === 2);
+    assert.ok(callResp, "expected response for id=2 before process exit");
+    const parsed = JSON.parse(callResp.result.content[0].text);
+    assert.equal(parsed.ok, true, parsed.error);
+    assert.equal(parsed.result, 3);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
