@@ -71,16 +71,27 @@ const BASE_DESCRIPTION =
   "BM25 searchTools(query, topK) / describeTool(name), and persistent `state`. Overrides Pi's built-in " +
   "codemode when registered as `codemode`.";
 
-function unpackPiResult(res: PiToolResult | undefined): unknown {
+function unpackPiResult(toolName: string, res: PiToolResult | undefined): unknown {
   if (!res || typeof res !== "object") return res;
+  const rawText = Array.isArray(res.content)
+    ? res.content
+        .filter((c) => c && (c.type === "text" || typeof c.text === "string"))
+        .map((c) => (typeof c.text === "string" ? c.text : JSON.stringify(c)))
+        .join("\n")
+    : "";
+
   if (res.isError) {
-    const text = Array.isArray(res.content)
-      ? res.content.map((c) => (typeof c?.text === "string" ? c.text : JSON.stringify(c))).join("\n")
-      : "tool execution failed";
-    throw new Error(text || "tool execution failed");
+    // Pi bash returns isError=true on non-zero exit; preserve output+exit_code so $.nothrow() works.
+    if (toolName === "bash") {
+      return { output: rawText, exit_code: 1 };
+    }
+    throw new Error(rawText || "tool execution failed");
   }
   if (res.structuredContent !== undefined) {
     return res.structuredContent;
+  }
+  if (toolName === "read" || toolName === "bash") {
+    return toolName === "bash" ? { output: rawText, exit_code: 0 } : { content: rawText };
   }
   if (Array.isArray(res.content)) {
     const texts = res.content
@@ -183,7 +194,7 @@ export default function registerPiCodeMode(pi: PiExtensionAPI): void {
         signal: signal ?? null,
         dispatch: async (name: string, args: Record<string, unknown>) => {
           const res = await ctx.executeTool(name, args, { signal });
-          return unpackPiResult(res);
+          return unpackPiResult(name, res);
         },
       });
 

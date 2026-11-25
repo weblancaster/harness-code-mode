@@ -28,6 +28,12 @@ test("local-tools confines reads, writes, edits, grep, glob, and shell to worksp
     const r2 = await local.dispatch("local_read", { path: "src/app.js" });
     assert.match(r2.content, /retry = 5/);
 
+    // Special regex replacement tokens ($&, $$) must be written literally, not expanded
+    await local.dispatch("local_write", { path: "src/dollar.txt", content: "TOKEN=FOO\n" });
+    await local.dispatch("local_edit", { path: "src/dollar.txt", old_string: "FOO", new_string: "$&$$" });
+    const rd = await local.dispatch("local_read", { path: "src/dollar.txt" });
+    assert.equal(rd.content, "TOKEN=$&$$\n");
+
     const gr = await local.dispatch("local_grep", { pattern: "retry = 5" });
     assert.ok(gr.matches.length >= 1);
 
@@ -38,7 +44,14 @@ test("local-tools confines reads, writes, edits, grep, glob, and shell to worksp
     assert.equal(sh.exit_code, 0);
     assert.match(sh.output, /hello-local/);
 
-    // Traversal and symlink escapes MUST be rejected
+    // Traversal, live symlink, and DANGLING symlink escapes MUST be rejected
+    const danglingTarget = path.join(outside, "pwned-new.txt");
+    fs.symlinkSync(danglingTarget, path.join(ws, "dangling-link.txt"));
+    await assert.rejects(
+      () => local.dispatch("local_write", { path: "dangling-link.txt", content: "escaped" }),
+      /escapes workspace|symlink/i,
+    );
+    assert.equal(fs.existsSync(danglingTarget), false);
     await assert.rejects(
       () => local.dispatch("local_read", { path: "../outside.txt" }),
       /escapes workspace/i,
@@ -206,20 +219,36 @@ args = ["-y", "github:weblancaster/harness-code-mode"]
 
 [mcp_servers.local_stdio]
 command = "node"
-args = ["srv.js", "--flag"]
+args = [
+  "srv.js",
+  "--flag",
+]
+env = { INLINE_KEY = "inline-val" }
 
-[mcp_servers.local_stdio.env]
-FOO = "bar"
+[mcp_servers."example.com"]
+url = "https://dotted.invalid/mcp"
 `,
     );
 
     const servers = loadUpstreamConfig({ configPath: mcpJson, codexConfigPath: codexToml });
-    assert.deepEqual(Object.keys(servers).sort(), ["docs", "github", "local_stdio"]);
+    assert.deepEqual(Object.keys(servers).sort(), ["docs", "example.com", "github", "local_stdio"]);
     assert.equal(servers.docs.url, "https://example.invalid/mcp");
     assert.equal(servers.docs.bearer_token_env_var, "DOCS_TOKEN");
     assert.deepEqual(servers.local_stdio.args, ["srv.js", "--flag"]);
-    assert.deepEqual(servers.local_stdio.env, { FOO: "bar" });
+    assert.deepEqual(servers.local_stdio.env, { INLINE_KEY: "inline-val" });
+
+    // Opt-in includeDisabled picks up disabled_srv for Codex aggregation
+    const withDisabled = loadUpstreamConfig({ codexConfigPath: codexToml, includeDisabled: true });
+    assert.ok(withDisabled.disabled_srv);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("McpAggregator rejects cleanly on missing binary ENOENT without uncaught error", async () => {
+  const agg = new McpAggregator({
+    broken: { command: "/nonexistent/binary/does-not-exist-xyz", args: [] },
+  });
+  await assert.rejects(() => agg.connect(), /ENOENT|exited|failed/i);
+  await agg.close();
 });

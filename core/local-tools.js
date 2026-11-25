@@ -28,35 +28,53 @@ function isInside(rootReal, targetReal) {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
-function resolveContained(rootReal, userPath, { allowMissing = false } = {}) {
+function resolveContained(rootReal, userPath, { allowMissing = false, forWrite = false } = {}) {
   const raw = String(userPath ?? "").trim();
   if (!raw) throw new Error("path is required");
   const candidate = path.resolve(rootReal, raw);
   if (!isInside(rootReal, candidate)) {
     throw new Error(`path escapes workspace: ${userPath}`);
   }
-  if (fs.existsSync(candidate)) {
-    const real = fs.realpathSync(candidate);
-    if (!isInside(rootReal, real)) {
-      throw new Error(`path escapes workspace via symlink: ${userPath}`);
+
+  // Walk every path segment under rootReal with lstatSync so BOTH live and dangling symlinks are caught.
+  const rel = path.relative(rootReal, candidate);
+  if (rel) {
+    const parts = rel.split(path.sep);
+    let cur = rootReal;
+    for (let i = 0; i < parts.length; i++) {
+      cur = path.join(cur, parts[i]);
+      let st;
+      try {
+        st = fs.lstatSync(cur);
+      } catch (err) {
+        if (err && err.code === "ENOENT") {
+          if (!allowMissing) {
+            throw new Error(`file not found: ${userPath}`);
+          }
+          // Remaining segments do not exist yet; current ancestor is already verified inside rootReal.
+          return candidate;
+        }
+        throw err;
+      }
+      if (st.isSymbolicLink()) {
+        if (forWrite) {
+          throw new Error(`refusing to write through symlink: ${userPath}`);
+        }
+        let targetReal;
+        try {
+          targetReal = fs.realpathSync(cur);
+        } catch {
+          throw new Error(`path escapes workspace via dangling symlink: ${userPath}`);
+        }
+        if (!isInside(rootReal, targetReal)) {
+          throw new Error(`path escapes workspace via symlink: ${userPath}`);
+        }
+        cur = targetReal;
+      }
     }
-    return real;
+    return cur;
   }
-  if (!allowMissing) {
-    throw new Error(`file not found: ${userPath}`);
-  }
-  // Walk up to nearest existing ancestor and verify its realpath is inside rootReal.
-  let probe = path.dirname(candidate);
-  while (!fs.existsSync(probe)) {
-    const parent = path.dirname(probe);
-    if (parent === probe) break;
-    probe = parent;
-  }
-  const ancestorReal = fs.realpathSync(probe);
-  if (!isInside(rootReal, ancestorReal)) {
-    throw new Error(`path escapes workspace via parent symlink: ${userPath}`);
-  }
-  return candidate;
+  return rootReal;
 }
 
 function globToRegExp(pattern) {
@@ -150,7 +168,7 @@ export function createLocalTools(workspaceRoot) {
     },
     {
       name: "local_shell",
-      description: "Run a foreground shell command confined to the workspace",
+      description: "Run a foreground shell command with workdir confined to the workspace (executes with host permissions)",
       schema: {
         type: "object",
         properties: {
@@ -175,13 +193,13 @@ export function createLocalTools(workspaceRoot) {
         return { content: slice.join("\n"), total_lines: lines.length };
       }
       case "local_write": {
-        const target = resolveContained(rootReal, args.path, { allowMissing: true });
+        const target = resolveContained(rootReal, args.path, { allowMissing: true, forWrite: true });
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, String(args.content ?? ""), "utf8");
         return { ok: true, path: path.relative(rootReal, target) };
       }
       case "local_edit": {
-        const target = resolveContained(rootReal, args.path);
+        const target = resolveContained(rootReal, args.path, { forWrite: true });
         const oldStr = String(args.old_string ?? "");
         const newStr = String(args.new_string ?? "");
         if (!oldStr) throw new Error("old_string must be non-empty");
@@ -191,7 +209,7 @@ export function createLocalTools(workspaceRoot) {
         }
         const updated = args.replace_all
           ? current.split(oldStr).join(newStr)
-          : current.replace(oldStr, newStr);
+          : current.replace(oldStr, () => newStr);
         fs.writeFileSync(target, updated, "utf8");
         return { ok: true, path: path.relative(rootReal, target) };
       }
@@ -237,6 +255,7 @@ export function createLocalTools(workspaceRoot) {
         return await new Promise((resolve) => {
           const proc = spawn("/bin/sh", ["-c", command], {
             cwd,
+            detached: true,
             stdio: ["ignore", "pipe", "pipe"],
           });
           let out = "";
@@ -250,9 +269,9 @@ export function createLocalTools(workspaceRoot) {
           const timer = setTimeout(() => {
             timedOut = true;
             try {
-              proc.kill("SIGKILL");
+              process.kill(-proc.pid, "SIGKILL");
             } catch {
-              // Ignore.
+              try { proc.kill("SIGKILL"); } catch {}
             }
           }, timeoutMs);
           proc.once("exit", (code) => {

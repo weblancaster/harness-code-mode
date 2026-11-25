@@ -141,6 +141,7 @@ export class CodemodeSession {
     let readySeen = false;
 
     rl.on("line", (line) => {
+      if (this._proc !== proc) return;
       if (!line.trim()) return;
       let msg;
       try {
@@ -161,10 +162,11 @@ export class CodemodeSession {
         readySeen = true;
         rejectReady(new Error(`worker exited before ready (${reason}): ${stderrBuf.trim()}`));
       }
-      if (this._proc === proc) {
-        this._proc = null;
-        this._rl = null;
+      if (this._proc !== proc) {
+        return;
       }
+      this._proc = null;
+      this._rl = null;
       const run = this._activeRun;
       if (run && !run.settled) {
         run.finish({
@@ -290,6 +292,10 @@ export class CodemodeSession {
   }
 
   async close() {
+    const run = this._activeRun;
+    if (run && !run.settled) {
+      run.finish({ ok: false, error: "session closed" });
+    }
     const proc = this._proc;
     this._proc = null;
     this._rl = null;
@@ -367,6 +373,12 @@ export class CodemodeSession {
         error: String(err && err.message ? err.message : err),
         stats: { tool_calls: 0, calls: [], elapsed_s: 0, parallel_peak: 0 },
       };
+    }
+
+    // Re-check signal after async spawn in case abort fired while worker was starting.
+    if (signal && signal.aborted) {
+      this.forceKill("execution aborted");
+      return { ok: false, error: "execution aborted", stats: { tool_calls: 0, calls: [], elapsed_s: 0, parallel_peak: 0 } };
     }
 
     const nextKey = JSON.stringify({ tools: wireTools, helperBindings });

@@ -53,11 +53,45 @@ function emit(obj) {
 const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, hostLog) {
   "use strict";
 
-  const pending = new Map();
+  // Capture pristine intrinsic references at startup so user code mutating globals cannot break the bridge.
+  const _JSON_parse = JSON.parse;
+  const _JSON_stringify = JSON.stringify;
+  const _Promise = Promise;
+  const _Promise_resolve = Promise.resolve.bind(Promise);
+  const _Promise_reject = Promise.reject.bind(Promise);
+  const _Function = Function;
+  const _Error = Error;
+  const _String = String;
+  const _Object_create = Object.create;
+  const _Object_assign = Object.assign;
+  const _Object_keys = Object.keys;
+  const _Array_isArray = Array.isArray;
+  const _Map = Map;
+  const _mapGet = Map.prototype.get;
+  const _mapSet = Map.prototype.set;
+  const _mapDelete = Map.prototype.delete;
+  const _mapEntries = Map.prototype.entries;
+
+  function safeErrorMessage(err) {
+    try {
+      if (err && typeof err === "object" && typeof err.message === "string") return err.message;
+    } catch {}
+    try {
+      return _String(err);
+    } catch {
+      try {
+        return _JSON_stringify(err);
+      } catch {
+        return "[unprintable thrown value]";
+      }
+    }
+  }
+
+  const pending = new _Map();
   let nextCallId = 1;
   let currentExecId = null;
-  let toolMap = Object.create(null); // jsName -> registryName
-  let bindings = Object.create(null);
+  let toolMap = _Object_create(null); // jsName -> registryName
+  let bindings = _Object_create(null);
 
   function shellQuote(val) {
     return "'" + String(val).replace(/'/g, "'\\\\''") + "'";
@@ -168,28 +202,39 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
       if (opts.timeout != null) args.timeout = opts.timeout;
 
       started = invokeBinding("shell", args).then((res) => {
-        const out = res && typeof res === "object"
+        const out = res && typeof res === "object" && ("output" in res || "stdout" in res || "exit_code" in res || "exitCode" in res)
           ? res
-          : { output: String(res ?? ""), exit_code: 0 };
+          : { output: typeof res === "string" ? res : _JSON_stringify(res ?? ""), exit_code: 0 };
         const exitCode = typeof out.exit_code === "number"
           ? out.exit_code
           : (typeof out.exitCode === "number" ? out.exitCode : 0);
         const output = typeof out.output === "string"
           ? out.output
-          : (typeof out.stdout === "string" ? out.stdout : String(out.output ?? ""));
-        const enriched = Object.assign({}, out, {
+          : (typeof out.stdout === "string" ? out.stdout : _String(out.output ?? ""));
+        const enriched = _Object_assign({}, out, {
           output,
           exit_code: exitCode,
           text() { return output; },
-          json() { return JSON.parse(output); },
+          json() { return _JSON_parse(output); },
         });
         if (!opts.nothrow && exitCode !== 0) {
-          const err = new Error("Command failed with exit code " + exitCode + ": " + output.slice(0, 500));
+          const err = new _Error("Command failed with exit code " + exitCode + ": " + output.slice(0, 500));
           err.exit_code = exitCode;
           err.output = output;
           throw err;
         }
         return enriched;
+      }, (err) => {
+        if (opts.nothrow) {
+          const msg = safeErrorMessage(err);
+          return {
+            output: msg,
+            exit_code: typeof err?.exit_code === "number" ? err.exit_code : 1,
+            text() { return msg; },
+            json() { return _JSON_parse(msg); },
+          };
+        }
+        throw err;
       });
       started.catch(() => {});
       return started;
@@ -237,17 +282,17 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
 
   async function read(pathOrOpts, opts = {}) {
     const args = typeof pathOrOpts === "string"
-      ? Object.assign({ path: pathOrOpts }, opts)
-      : Object.assign({}, pathOrOpts);
+      ? _Object_assign({ path: pathOrOpts }, opts)
+      : _Object_assign({}, pathOrOpts);
     const res = await invokeBinding("read", args);
-    if (res && typeof res === "object") {
-      const rawContent = typeof res.content === "string" ? res.content : "";
+    if (res && typeof res === "object" && typeof res.content === "string") {
+      const rawContent = res.content;
       const text = bindings.readStripLineNums
         ? rawContent.split("\\n").map((line) => line.replace(/^\\d+\\|/, "")).join("\\n")
         : rawContent;
-      return Object.assign({}, res, { text });
+      return _Object_assign({}, res, { text });
     }
-    const text = String(res ?? "");
+    const text = typeof res === "string" ? res : _JSON_stringify(res ?? "");
     return { content: text, text };
   }
 
@@ -322,69 +367,67 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
 
   return {
     configure(configJson) {
-      const cfg = JSON.parse(configJson);
-      toolMap = Object.create(null);
+      const cfg = _JSON_parse(configJson);
+      toolMap = _Object_create(null);
       for (const entry of cfg.tools || []) {
         toolMap[entry.js] = entry.name;
       }
       if (cfg.helperBindings && typeof cfg.helperBindings === "object") {
-        bindings = Object.assign(Object.create(null), cfg.helperBindings);
+        bindings = _Object_assign(_Object_create(null), cfg.helperBindings);
       }
     },
     setExecId(id) {
-      // Cancel any leftover pending calls from previous execs so they cannot interfere.
-      for (const [callId, entry] of pending.entries()) {
+      for (const [callId, entry] of _mapEntries.call(pending)) {
         if (entry.execId !== id) {
-          pending.delete(callId);
+          _mapDelete.call(pending, callId);
         }
       }
       currentExecId = id;
     },
     deliver(replyJson) {
-      const msg = JSON.parse(replyJson);
-      const entry = pending.get(msg.id);
+      const msg = _JSON_parse(replyJson);
+      const entry = _mapGet.call(pending, msg.id);
       if (!entry) return;
-      pending.delete(msg.id);
+      _mapDelete.call(pending, msg.id);
       if (msg.exec_id !== currentExecId || entry.execId !== currentExecId) {
         return;
       }
       if (msg.ok) {
         entry.resolve(msg.result);
       } else {
-        entry.reject(new Error(String(msg.error || "tool error")));
+        entry.reject(new _Error(_String(msg.error || "tool error")));
       }
     },
     runExec(codeStr, onDoneJson) {
       let fn;
       try {
-        fn = new Function("return (async () => {\\n" + codeStr + "\\n})();");
+        fn = new _Function("return (async () => {\\n" + codeStr + "\\n})();");
       } catch (e) {
-        onDoneJson(JSON.stringify({ ok: false, error: String(e && e.message ? e.message : e) }));
+        onDoneJson(_JSON_stringify({ ok: false, error: safeErrorMessage(e) }));
         return;
       }
       let p;
       try {
         p = fn();
       } catch (e) {
-        onDoneJson(JSON.stringify({ ok: false, error: String(e && e.message ? e.message : e) }));
+        onDoneJson(_JSON_stringify({ ok: false, error: safeErrorMessage(e) }));
         return;
       }
-      Promise.resolve(p).then(
+      _Promise_resolve(p).then(
         (value) => {
           let serialized;
           try {
-            serialized = JSON.stringify({ ok: true, result: value === undefined ? null : value });
+            serialized = _JSON_stringify({ ok: true, result: value === undefined ? null : value });
           } catch (e) {
-            serialized = JSON.stringify({
+            serialized = _JSON_stringify({
               ok: false,
-              error: "return value is not JSON-serializable: " + String(e && e.message ? e.message : e),
+              error: "return value is not JSON-serializable: " + safeErrorMessage(e),
             });
           }
           onDoneJson(serialized);
         },
         (err) => {
-          const msg = err && typeof err === "object" && err.message ? err.message : String(err);
-          onDoneJson(JSON.stringify({ ok: false, error: msg }));
+          onDoneJson(_JSON_stringify({ ok: false, error: safeErrorMessage(err) }));
         },
       );
     },
@@ -469,10 +512,14 @@ function handleMessage(msg) {
     case "update_catalog": {
       catalog = new Catalog(Array.isArray(msg.tools) ? msg.tools : []);
       ensureContext();
-      vmApi.configure(JSON.stringify({
-        tools: catalog.toWire(),
-        helperBindings: msg.helperBindings,
-      }));
+      try {
+        vmApi.configure(JSON.stringify({
+          tools: catalog.toWire(),
+          helperBindings: msg.helperBindings,
+        }));
+      } catch {
+        // Ignore if user code corrupted VM internals.
+      }
       break;
     }
     case "exec": {
@@ -481,7 +528,13 @@ function handleMessage(msg) {
       activeExecId = execId;
       execSettled = false;
       currentLogs = [];
-      vmApi.setExecId(execId);
+      try {
+        vmApi.setExecId(execId);
+      } catch (e) {
+        execSettled = true;
+        emit({ type: "done", exec_id: execId, ok: false, error: String(e), logs: [] });
+        break;
+      }
       vmApi.runExec(String(msg.code ?? ""), (doneJson) => {
         try {
           if (activeExecId !== execId || execSettled) return;

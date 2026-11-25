@@ -65,7 +65,7 @@ tool_timeout_sec = 600
 startup_timeout_sec = 60
 ```
 
-> **Avoid double-spawning upstream MCP servers:** Once you aggregate your upstream servers through `codemode`, set `enabled = false` on those individual `[mcp_servers.<name>]` entries in Codex (or put them in a separate `mcp.json` passed via `--config`) so Codex does not spawn a second copy alongside `codemode`.
+> **Avoid double-spawning upstream MCP servers:** Either keep your upstream servers in a dedicated `mcp.json` passed via `--config /path/to/mcp.json` (recommended), **or** set `enabled = false` on those individual `[mcp_servers.<name>]` entries in `~/.codex/config.toml` and pass `--include-disabled` alongside `--from-codex ~/.codex/config.toml` so only `codemode` spawns them.
 
 ### Claude Code / Cursor / OpenCode / any MCP host
 
@@ -133,7 +133,7 @@ Never exposed on Hermes: `codemode`, `delegate_task`, `clarify`, `execute_code`,
 - **Native harness approvals & redaction:**
   - **Hermes:** Dispatches fail-closed through `model_tools.handle_function_call` under `programmatic_file_read()` + `thread_scoped_silence()` with per-call `contextvars.Context.copy()`, `capture_thread_callbacks()`, `tools.interrupt.acting_for_tid`, `is_interrupted()` polling, `_TERMINAL_BLOCKED_PARAMS` stripping, subagent guard, and `ctx.redact_text()`.
   - **Pi:** Dispatches via `ctx.executeTool(name, args, { signal })` so Pi's `tool_call` permission gates, validation, and `nestedCalls` stay in charge.
-  - **Standalone MCP (`--allow-local-tools`):** Off by default. When opted in, file and shell operations run inside the MCP server process confined by `fs.realpathSync` to `--workspace <dir>`, and the host only approves the outer `codemode` call.
+  - **Standalone MCP (`--allow-local-tools`):** Off by default and requires explicit `--workspace <dir>`. When opted in, file operations are realpath-confined (and symlinks are rejected on write); `local_shell` confines its initial `workdir` to `--workspace`, while shell commands execute with host permissions and the host only approves the outer `codemode` call.
 
 ## Tests
 

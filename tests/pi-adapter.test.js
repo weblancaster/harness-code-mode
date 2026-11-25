@@ -57,6 +57,7 @@ test("Pi extension executes parallel ctx.executeTool calls, prefers structuredCo
     tools: [
       { name: "codemode", description: "self", parameters: {} },
       { name: "bash", description: "Run shell", parameters: { type: "object" } },
+      { name: "read", description: "Read file", parameters: { type: "object" } },
       { name: "edit", description: "Edit file", parameters: { type: "object" } },
       { name: "mcp__svc__get", description: "Get structured record", parameters: { type: "object" } },
       { name: "mcp__svc__denied", description: "Blocked by permission gate", parameters: { type: "object" } },
@@ -64,7 +65,16 @@ test("Pi extension executes parallel ctx.executeTool calls, prefers structuredCo
     async executeTool(name, args) {
       seen.push({ name, args });
       if (name === "bash") {
-        return { content: [{ type: "text", text: JSON.stringify({ output: "ok\n", exit_code: 0 }) }] };
+        if (String(args.command || "").includes("false")) {
+          return { isError: true, content: [{ type: "text", text: "Command exited with code 1" }] };
+        }
+        if (String(args.command || "").includes("json-out")) {
+          return { content: [{ type: "text", text: '{"a":1}' }] };
+        }
+        return { content: [{ type: "text", text: "ok\n" }] };
+      }
+      if (name === "read") {
+        return { content: [{ type: "text", text: '{"pkg":"demo"}' }] };
       }
       if (name === "edit") {
         return { content: [{ type: "text", text: "edited" }] };
@@ -97,10 +107,13 @@ test("Pi extension executes parallel ctx.executeTool calls, prefers structuredCo
             tools.mcp__svc__get({ id: 2 }),
           ]);
           const sh = await $\`echo hi\`.cwd("/tmp").text();
+          const shJson = await $\`echo json-out\`.json();
+          const shFail = await $\`false\`.nothrow();
+          const pkgFile = await read("package.json");
           await edit("a.ts", "old", "new");
           let caught = "";
           try { await tools.mcp__svc__denied({}); } catch (e) { caught = e.message; }
-          return { a, b, sh: sh.trim(), caught };
+          return { a, b, sh: sh.trim(), shJson, shFailCode: shFail.exit_code, pkg: JSON.parse(pkgFile.text), caught };
         `,
       },
       new AbortController().signal,
@@ -112,6 +125,9 @@ test("Pi extension executes parallel ctx.executeTool calls, prefers structuredCo
     assert.deepEqual(out.result.a, { id: 1, fromStructured: true });
     assert.deepEqual(out.result.b, { id: 2, fromStructured: true });
     assert.equal(out.result.sh, "ok");
+    assert.deepEqual(out.result.shJson, { a: 1 });
+    assert.equal(out.result.shFailCode, 1);
+    assert.deepEqual(out.result.pkg, { pkg: "demo" });
     assert.match(out.result.caught, /permission gate/i);
 
     const bashCall = seen.find((s) => s.name === "bash");

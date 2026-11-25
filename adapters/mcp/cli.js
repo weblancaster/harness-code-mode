@@ -13,8 +13,9 @@ function parseArgs(argv) {
   const opts = {
     configPath: null,
     codexConfigPath: null,
+    includeDisabled: false,
     allowLocalTools: false,
-    workspace: process.cwd(),
+    workspace: null,
     timeoutSec: 60,
     memoryMb: 256,
     maxToolCalls: 200,
@@ -25,6 +26,7 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--config" && argv[i + 1]) opts.configPath = expandHome(argv[++i]);
     else if (a === "--from-codex" && argv[i + 1]) opts.codexConfigPath = expandHome(argv[++i]);
+    else if (a === "--include-disabled") opts.includeDisabled = true;
     else if (a === "--allow-local-tools") opts.allowLocalTools = true;
     else if (a === "--workspace" && argv[i + 1]) opts.workspace = path.resolve(expandHome(argv[++i]));
     else if (a === "--timeout" && argv[i + 1]) opts.timeoutSec = Number(argv[++i]);
@@ -34,11 +36,14 @@ function parseArgs(argv) {
     else if (a === "--max-result-chars" && argv[i + 1]) opts.maxResultChars = Number(argv[++i]);
     else if (a === "--help" || a === "-h") {
       process.stderr.write(
-        "Usage: codemode-mcp [--config mcp.json] [--from-codex ~/.codex/config.toml] " +
+        "Usage: codemode-mcp [--config mcp.json] [--from-codex ~/.codex/config.toml [--include-disabled]] " +
           "[--allow-local-tools --workspace dir] [--timeout 60] [--memory-mb 256] [--max-calls 200] [--max-concurrency 8]\n",
       );
       process.exit(0);
     }
+  }
+  if (opts.allowLocalTools && !opts.workspace) {
+    throw new Error("--allow-local-tools requires an explicit --workspace <dir>");
   }
   return opts;
 }
@@ -50,6 +55,7 @@ async function main() {
   const serverConfigs = loadUpstreamConfig({
     configPath: opts.configPath,
     codexConfigPath: opts.codexConfigPath,
+    includeDisabled: opts.includeDisabled,
   });
   const aggregator = new McpAggregator(serverConfigs);
   await aggregator.connect();
@@ -93,7 +99,7 @@ async function main() {
     dispatch,
     hasLocalTools: Boolean(local),
     upstreamCount: aggregator.tools.length,
-    onClose: shutdown,
+    onClose: () => shutdown().finally(() => process.exit(0)),
   });
   server.start();
 }

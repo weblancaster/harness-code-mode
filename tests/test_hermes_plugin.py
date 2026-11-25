@@ -64,6 +64,7 @@ class FakeRegistry:
 
 class TestHermesPlugin(unittest.TestCase):
     def setUp(self):
+        self._saved_delegated_env = os.environ.pop("HERMES_DELEGATED_CHILD_CONTEXT", None)
         self.mod = load_plugin_module()
         self.ctx = FakePluginContext(
             {
@@ -75,7 +76,7 @@ class TestHermesPlugin(unittest.TestCase):
         )
         self.dispatched = []
         self.fake_entries = [
-            SimpleNamespace(name="terminal", description="Run shell", schema={"type": "object"}, check_fn=None),
+            SimpleNamespace(name="terminal", description="", schema={"description": "Schema terminal desc", "parameters": {"type": "object"}}, check_fn=None),
             SimpleNamespace(name="read_file", description="Read file", schema={"type": "object"}, check_fn=None),
             SimpleNamespace(name="patch", description="Patch file", schema={"type": "object"}, check_fn=None),
             SimpleNamespace(name="mcp__github__list_prs", description="List PRs", schema={"type": "object"}, check_fn=None),
@@ -87,6 +88,10 @@ class TestHermesPlugin(unittest.TestCase):
     def tearDown(self):
         if getattr(self.mod, "_manager", None):
             self.mod._manager.close_all()
+        if self._saved_delegated_env is not None:
+            os.environ["HERMES_DELEGATED_CHILD_CONTEXT"] = self._saved_delegated_env
+        else:
+            os.environ.pop("HERMES_DELEGATED_CHILD_CONTEXT", None)
 
     def test_register_wires_tool_command_hooks_prompt_skill_and_unload(self):
         self.mod.register(self.ctx)
@@ -110,6 +115,8 @@ class TestHermesPlugin(unittest.TestCase):
         self.assertNotIn("delegate_task", names)
         self.assertNotIn("tool_call", names)
         self.assertNotIn("disabled_mcp", names)
+        term_entry = [e for e in exposed if e["name"] == "terminal"][0]
+        self.assertEqual(term_entry["description"], "Schema terminal desc")
 
     def test_handler_strips_terminal_blocked_params_forwards_ids_and_redacts(self):
         def fake_handle_fn(tool_name, tool_args, **fwd):
@@ -166,7 +173,7 @@ class TestHermesPlugin(unittest.TestCase):
         finally:
             self.mod._hermes_runtime_available = orig_probe
 
-        # Restricted subagent guard
+        # Restricted subagent guard (env var AND in-process ContextVar path)
         os.environ["HERMES_DELEGATED_CHILD_CONTEXT"] = "1"
         try:
             raw = self.ctx.tools["codemode"]["handler"]({"code": "return 1;"}, session_id="sub-1")
@@ -175,6 +182,16 @@ class TestHermesPlugin(unittest.TestCase):
             self.assertIn("subagent", parsed["error"].lower())
         finally:
             os.environ.pop("HERMES_DELEGATED_CHILD_CONTEXT", None)
+
+        orig_sub = self.mod._is_delegated_subagent
+        try:
+            self.mod._is_delegated_subagent = lambda: True
+            raw2 = self.ctx.tools["codemode"]["handler"]({"code": "return 1;"}, session_id="sub-2")
+            parsed2 = json.loads(raw2)
+            self.assertFalse(parsed2["ok"])
+            self.assertIn("subagent", parsed2["error"].lower())
+        finally:
+            self.mod._is_delegated_subagent = orig_sub
 
     def test_cleanup_hooks_and_slash_command(self):
         self.mod.register(self.ctx)

@@ -165,6 +165,16 @@ def _check() -> bool:
     return _hermes_runtime_available()
 
 
+def _is_delegated_subagent() -> bool:
+    if os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT"):
+        return True
+    try:
+        from agent.delegation_context import is_delegated_child_context
+        return bool(is_delegated_child_context())
+    except Exception:
+        return False
+
+
 def _session_key() -> str:
     try:
         from gateway.session_context import get_session_env
@@ -206,12 +216,16 @@ def _exposed_entries(registry_override: Any = None) -> list[dict[str, Any]]:
                     continue
             except Exception:
                 continue
-        schema = getattr(entry, "schema", None) or {}
+        raw_schema = getattr(entry, "schema", None) or {}
+        desc = str(getattr(entry, "description", "") or "")
+        if not desc and isinstance(raw_schema, dict) and isinstance(raw_schema.get("description"), str):
+            desc = raw_schema["description"]
+        schema = raw_schema
         if isinstance(schema, dict) and "parameters" in schema and isinstance(schema["parameters"], dict):
             schema = schema["parameters"]
         out.append({
             "name": name,
-            "description": str(getattr(entry, "description", "") or ""),
+            "description": desc,
             "schema": schema if isinstance(schema, dict) else {},
         })
     return out
@@ -265,7 +279,7 @@ def _handle(
     **_extra: Any,
 ) -> str:
     try:
-        if os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT") and not _setting("allow_in_subagents", False):
+        if _is_delegated_subagent() and not _setting("allow_in_subagents", False):
             return json.dumps({
                 "ok": False,
                 "error": "codemode is disabled in restricted subagents until enabled_tools is exposed to plugins",

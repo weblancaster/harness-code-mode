@@ -175,6 +175,8 @@ class CodemodeSession:
                         q.put(json.loads(s))
                     except Exception:
                         continue
+            except Exception:
+                pass
             finally:
                 q.put(None)
 
@@ -244,21 +246,28 @@ class CodemodeSession:
         proc = self._proc
         self._proc = None
         self._catalog_key = ""
-        if proc is None or proc.poll() is not None:
+        if proc is None:
             return
-        try:
-            if proc.stdin:
-                proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=0.5)
-        except Exception:
+        if proc.poll() is None:
             try:
-                proc.kill()
-                proc.wait(timeout=1.0)
+                if proc.stdin:
+                    proc.stdin.close()
             except Exception:
                 pass
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
     def _validate_call_frame(
         self,
@@ -558,8 +567,10 @@ class CodemodeManager:
             victims.append(self._sessions.pop(oldest_sid))
         if victims:
             victim_ids = {v.session_id for v in victims}
-            for sids in self._key_to_sids.values():
+            for k, sids in list(self._key_to_sids.items()):
                 sids.difference_update(victim_ids)
+                if not sids:
+                    self._key_to_sids.pop(k, None)
         return victims
 
     def _get_or_create(self, session_id: str, session_key: str = "") -> CodemodeSession:
@@ -605,8 +616,10 @@ class CodemodeManager:
         sid = str(session_id)
         with self._map_lock:
             sess = self._sessions.pop(sid, None)
-            for sids in self._key_to_sids.values():
+            for k, sids in list(self._key_to_sids.items()):
                 sids.discard(sid)
+                if not sids:
+                    self._key_to_sids.pop(k, None)
         if sess is not None:
             sess.force_kill()
 

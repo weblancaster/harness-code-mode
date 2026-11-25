@@ -31,6 +31,31 @@ function isSelfServer(name, cfg) {
   );
 }
 
+function splitTopLevel(inner, sep = ",") {
+  const items = [];
+  let cur = "";
+  let inQuote = null;
+  let esc = false;
+  let depth = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (esc) { cur += ch; esc = false; continue; }
+    if (inQuote === '"' && ch === "\\") { cur += ch; esc = true; continue; }
+    if (inQuote) { cur += ch; if (ch === inQuote) inQuote = null; continue; }
+    if (ch === '"' || ch === "'") { inQuote = ch; cur += ch; continue; }
+    if (ch === "[" || ch === "{") { depth++; cur += ch; continue; }
+    if (ch === "]" || ch === "}") { depth = Math.max(0, depth - 1); cur += ch; continue; }
+    if (ch === sep && depth === 0) {
+      if (cur.trim()) items.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) items.push(cur.trim());
+  return items;
+}
+
 function parseTomlValue(raw) {
   const s = raw.trim();
   if (!s) return "";
@@ -50,41 +75,19 @@ function parseTomlValue(raw) {
   if (s.startsWith("[") && s.endsWith("]")) {
     const inner = s.slice(1, -1).trim();
     if (!inner) return [];
-    const items = [];
-    let cur = "";
-    let inQuote = null;
-    let esc = false;
-    for (let i = 0; i < inner.length; i++) {
-      const ch = inner[i];
-      if (esc) {
-        cur += ch;
-        esc = false;
-        continue;
-      }
-      if (inQuote === '"' && ch === "\\") {
-        cur += ch;
-        esc = true;
-        continue;
-      }
-      if (inQuote) {
-        cur += ch;
-        if (ch === inQuote) inQuote = null;
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        inQuote = ch;
-        cur += ch;
-        continue;
-      }
-      if (ch === ",") {
-        if (cur.trim()) items.push(parseTomlValue(cur));
-        cur = "";
-        continue;
-      }
-      cur += ch;
+    return splitTopLevel(inner, ",").map((item) => parseTomlValue(item));
+  }
+  if (s.startsWith("{") && s.endsWith("}")) {
+    const inner = s.slice(1, -1).trim();
+    const obj = {};
+    if (!inner) return obj;
+    for (const pair of splitTopLevel(inner, ",")) {
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      const k = pair.slice(0, eq).trim().replace(/^["']|["']$/g, "");
+      obj[k] = parseTomlValue(pair.slice(eq + 1));
     }
-    if (cur.trim()) items.push(parseTomlValue(cur));
-    return items;
+    return obj;
   }
   return s;
 }
@@ -117,17 +120,34 @@ function stripTomlComment(line) {
   return line;
 }
 
+function bracketDelta(str) {
+  let delta = 0;
+  let inQuote = null;
+  let esc = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (esc) { esc = false; continue; }
+    if (inQuote === '"' && ch === "\\") { esc = true; continue; }
+    if (inQuote) { if (ch === inQuote) inQuote = null; continue; }
+    if (ch === '"' || ch === "'") { inQuote = ch; continue; }
+    if (ch === "[" || ch === "{") delta++;
+    else if (ch === "]" || ch === "}") delta--;
+  }
+  return delta;
+}
+
 function parseCodexTomlMcpServers(tomlText) {
   const servers = {};
   let currentServer = null;
   let subtable = null;
+  const rawLines = tomlText.split(/\r?\n/);
 
-  for (const rawLine of tomlText.split(/\r?\n/)) {
-    const line = stripTomlComment(rawLine).trim();
+  for (let idx = 0; idx < rawLines.length; idx++) {
+    let line = stripTomlComment(rawLines[idx]).trim();
     if (!line) continue;
     const sec = line.match(/^\[([^\]]+)\]$/);
     if (sec) {
-      const parts = sec[1].split(".").map((p) => p.trim().replace(/^["']|["']$/g, ""));
+      const parts = splitTopLevel(sec[1], ".").map((p) => p.replace(/^["']|["']$/g, ""));
       if (parts[0] === "mcp_servers" && parts[1]) {
         currentServer = parts[1];
         subtable = parts[2] || null;
@@ -145,7 +165,16 @@ function parseCodexTomlMcpServers(tomlText) {
     const eq = line.indexOf("=");
     if (eq <= 0) continue;
     const key = line.slice(0, eq).trim().replace(/^["']|["']$/g, "");
-    const val = parseTomlValue(line.slice(eq + 1));
+    let rawVal = line.slice(eq + 1).trim();
+    let open = bracketDelta(rawVal);
+    while (open > 0 && idx + 1 < rawLines.length) {
+      idx++;
+      const cont = stripTomlComment(rawLines[idx]).trim();
+      if (!cont) continue;
+      rawVal += " " + cont;
+      open += bracketDelta(cont);
+    }
+    const val = parseTomlValue(rawVal);
     if (subtable) {
       servers[currentServer][subtable][key] = val;
     } else {
@@ -155,13 +184,18 @@ function parseCodexTomlMcpServers(tomlText) {
   return servers;
 }
 
-export function loadUpstreamConfig({ configPath = null, codexConfigPath = null, warn = (m) => process.stderr.write(m + "\n") } = {}) {
+export function loadUpstreamConfig({
+  configPath = null,
+  codexConfigPath = null,
+  includeDisabled = false,
+  warn = (m) => process.stderr.write(m + "\n"),
+} = {}) {
   const merged = {};
 
   const absorb = (entries) => {
     for (const [name, cfg] of Object.entries(entries || {})) {
       if (!cfg || typeof cfg !== "object") continue;
-      if (cfg.enabled === false) continue;
+      if (cfg.enabled === false && !includeDisabled) continue;
       if (isSelfServer(name, cfg)) continue;
       if (cfg.auth === "oauth" || cfg.oauth) {
         warn(`[codemode-mcp] skipping OAuth-authenticated upstream server '${name}' (not supported in v0.1)`);
@@ -222,12 +256,20 @@ class StdioMcpClient {
     const env = { ...process.env, ...(this.cfg.env || {}) };
     const args = Array.isArray(this.cfg.args) ? this.cfg.args.map(String) : [];
     const cwd = this.cfg.cwd ? expandHome(this.cfg.cwd) : undefined;
+    // Ignore stderr (never leave an unread pipe that deadlocks after 16-64KB of logs).
     const proc = spawn(String(this.cfg.command), args, {
       cwd,
       env,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "ignore"],
     });
     this._proc = proc;
+    const failPending = (errMsg) => {
+      for (const { reject, timer } of this._pending.values()) {
+        if (timer) clearTimeout(timer);
+        reject(new Error(errMsg));
+      }
+      this._pending.clear();
+    };
     const rl = readline.createInterface({ input: proc.stdout, crlfDelay: Infinity });
     rl.on("line", (line) => {
       if (!line.trim()) return;
@@ -238,17 +280,20 @@ class StdioMcpClient {
         return;
       }
       if (msg.id !== undefined && this._pending.has(msg.id)) {
-        const { resolve, reject } = this._pending.get(msg.id);
+        const { resolve, reject, timer } = this._pending.get(msg.id);
         this._pending.delete(msg.id);
+        if (timer) clearTimeout(timer);
         if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
         else resolve(msg.result);
       }
     });
+    proc.once("error", (err) => {
+      this._proc = null;
+      failPending(`upstream MCP server '${this.name}' failed to spawn: ${err.message}`);
+    });
     proc.once("exit", (code) => {
-      for (const { reject } of this._pending.values()) {
-        reject(new Error(`upstream MCP server '${this.name}' exited (${code})`));
-      }
-      this._pending.clear();
+      this._proc = null;
+      failPending(`upstream MCP server '${this.name}' exited (${code})`);
     });
 
     await this.request("initialize", {
@@ -261,19 +306,32 @@ class StdioMcpClient {
 
   _notify(method, params) {
     if (!this._proc || !this._proc.stdin.writable) return;
-    this._proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
+    try {
+      this._proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
+    } catch {
+      // Ignore write to exiting child.
+    }
   }
 
-  request(method, params) {
+  request(method, params, timeoutMs = 30_000) {
     const id = this._nextId++;
     return new Promise((resolve, reject) => {
-      this._pending.set(id, { resolve, reject });
       if (!this._proc || !this._proc.stdin.writable) {
-        this._pending.delete(id);
         reject(new Error(`upstream MCP server '${this.name}' is not connected`));
         return;
       }
-      this._proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      const timer = setTimeout(() => {
+        this._pending.delete(id);
+        reject(new Error(`upstream MCP server '${this.name}' timed out on ${method}`));
+      }, timeoutMs);
+      this._pending.set(id, { resolve, reject, timer });
+      try {
+        this._proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      } catch (err) {
+        clearTimeout(timer);
+        this._pending.delete(id);
+        reject(err);
+      }
     });
   }
 
@@ -401,23 +459,28 @@ export class McpAggregator {
 
   async connect() {
     const entries = Object.entries(this.serverConfigs);
-    await Promise.all(
-      entries.map(async ([name, cfg]) => {
-        const client = cfg.url ? new HttpMcpClient(name, cfg) : new StdioMcpClient(name, cfg);
-        await client.connect();
-        this.clients.set(name, client);
-        const list = await client.listTools();
-        for (const t of list) {
-          const fqName = `mcp__${name}__${t.name}`;
-          this.tools.push({
-            name: fqName,
-            description: String(t.description || ""),
-            schema: t.inputSchema || t.schema || {},
-          });
-          this._routes.set(fqName, { client, toolName: t.name });
-        }
-      }),
-    );
+    try {
+      await Promise.all(
+        entries.map(async ([name, cfg]) => {
+          const client = cfg.url ? new HttpMcpClient(name, cfg) : new StdioMcpClient(name, cfg);
+          this.clients.set(name, client);
+          await client.connect();
+          const list = await client.listTools();
+          for (const t of list) {
+            const fqName = `mcp__${name}__${t.name}`;
+            this.tools.push({
+              name: fqName,
+              description: String(t.description || ""),
+              schema: t.inputSchema || t.schema || {},
+            });
+            this._routes.set(fqName, { client, toolName: t.name });
+          }
+        }),
+      );
+    } catch (err) {
+      await this.close();
+      throw err;
+    }
   }
 
   has(name) {

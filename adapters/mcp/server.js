@@ -77,6 +77,7 @@ export class McpServer {
     this.onClose = onClose;
     this._rl = null;
     this._inflight = new Set();
+    this._activeRequestIds = new Set();
   }
 
   _write(obj) {
@@ -103,7 +104,9 @@ export class McpServer {
       return;
     }
     if (method === "notifications/cancelled") {
-      this.manager.forceKill(this.sessionId, params.reason || "cancelled by MCP host");
+      if (params.requestId === undefined || this._activeRequestIds.has(params.requestId)) {
+        this.manager.forceKill(this.sessionId, params.reason || "cancelled by MCP host");
+      }
       return;
     }
 
@@ -160,20 +163,25 @@ export class McpServer {
           });
           return;
         }
-        const out = await this.manager.run({
-          sessionId: this.sessionId,
-          code,
-          tools: this.tools,
-          helperBindings: this.helperBindings,
-          dispatch: this.dispatch,
-          timeoutSec: args.timeout,
-          reset: Boolean(args.reset),
-        });
-        this._ok(id, {
-          isError: !out.ok,
-          content: [{ type: "text", text: JSON.stringify(out) }],
-          structuredContent: out,
-        });
+        this._activeRequestIds.add(id);
+        try {
+          const out = await this.manager.run({
+            sessionId: this.sessionId,
+            code,
+            tools: this.tools,
+            helperBindings: this.helperBindings,
+            dispatch: this.dispatch,
+            timeoutSec: args.timeout,
+            reset: Boolean(args.reset),
+          });
+          this._ok(id, {
+            isError: !out.ok,
+            content: [{ type: "text", text: JSON.stringify(out) }],
+            structuredContent: out,
+          });
+        } finally {
+          this._activeRequestIds.delete(id);
+        }
         return;
       }
 
@@ -208,9 +216,9 @@ export class McpServer {
       this._inflight.add(task);
     });
     this._rl.on("close", () => {
-      Promise.allSettled(Array.from(this._inflight))
-        .then(() => (this.onClose ? Promise.resolve(this.onClose()) : undefined))
-        .finally(() => process.exit(0));
+      Promise.allSettled(Array.from(this._inflight)).then(() => {
+        if (this.onClose) return this.onClose();
+      });
     });
   }
 }

@@ -411,3 +411,35 @@ test("primitive-only VM boundary blocks process/require/fetch and constructor es
     await w.close();
   }
 });
+
+test("worker handles null-prototype throws and global intrinsic tampering across turns", async () => {
+  const w = spawnWorker();
+  try {
+    await w.nextMsg();
+    w.send({ type: "init", tools: [], helperBindings: {} });
+
+    // Throwing null-prototype object must settle cleanly, never hang
+    w.send({ type: "exec", exec_id: 1, code: "throw Object.create(null);" });
+    const d1 = await w.nextMsg(2000);
+    assert.equal(d1.type, "done");
+    assert.equal(d1.exec_id, 1);
+    assert.equal(d1.ok, false);
+
+    // Mutating global JSON.stringify / JSON.parse in turn 2 must not break turn 3
+    w.send({
+      type: "exec",
+      exec_id: 2,
+      code: 'JSON.stringify = () => { throw new Error("tampered"); }; JSON.parse = () => null; return { ok: 1 };',
+    });
+    const d2 = await w.nextMsg(2000);
+    assert.equal(d2.ok, true);
+    assert.deepEqual(d2.result, { ok: 1 });
+
+    w.send({ type: "exec", exec_id: 3, code: "return { stillWorks: true };" });
+    const d3 = await w.nextMsg(2000);
+    assert.equal(d3.ok, true);
+    assert.deepEqual(d3.result, { stillWorks: true });
+  } finally {
+    await w.close();
+  }
+});

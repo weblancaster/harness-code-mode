@@ -206,3 +206,14 @@ test("MCP server drains in-flight tools/call when stdin hits EOF immediately aft
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test("MCP CLI rejects --allow-local-tools without explicit --workspace", async () => {
+  const proc = spawn(process.execPath, [CLI_PATH, "--allow-local-tools"], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  proc.stderr.on("data", (d) => { stderr += d.toString(); });
+  const code = await new Promise((resolve) => proc.once("exit", resolve));
+  assert.notEqual(code, 0);
+  assert.match(stderr, /--workspace/i);
+});
