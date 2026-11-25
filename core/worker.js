@@ -325,12 +325,21 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
 
   async function glob(patternOrOpts, opts = {}) {
     const base = typeof patternOrOpts === "string"
-      ? Object.assign({ pattern: patternOrOpts }, opts)
-      : Object.assign({}, patternOrOpts);
+      ? _Object_assign({ pattern: patternOrOpts }, opts)
+      : _Object_assign({}, patternOrOpts);
     if (bindings.glob === "search_files" && base.target === undefined) {
       base.target = "files";
     }
-    return invokeBinding("glob", base);
+    const res = await invokeBinding("glob", base);
+    if (res && typeof res === "object") {
+      const list = _Array_isArray(res.files)
+        ? res.files
+        : (_Array_isArray(res.matches) ? res.matches : null);
+      if (list) {
+        return _Object_assign({}, res, { files: list, matches: list });
+      }
+    }
+    return res;
   }
 
   function searchTools(query, topK = 5) {

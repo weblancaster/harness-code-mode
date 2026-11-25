@@ -245,7 +245,7 @@ test("helperBindings support Hermes and Pi conventions with POSIX quoting and re
       () => ({ success: true }),
       () => ({ verified: true }),
       () => ({ matches: ["a.js:1"] }),
-      () => ({ matches: ["a.js"] }),
+      () => ({ files: ["a.js"], total_count: 1 }),
     ];
     for (let i = 0; i < replies.length; i++) {
       const c = await w.nextMsg();
@@ -263,6 +263,8 @@ test("helperBindings support Hermes and Pi conventions with POSIX quoting and re
     assert.deepEqual(calls[3].args, { path: "/tmp/demo.json", old_string: "old", new_string: "new" });
     assert.equal(calls[5].args.target, "content");
     assert.equal(calls[6].args.target, "files");
+    assert.deepEqual(done1.result.g2.files, ["a.js"]);
+    assert.deepEqual(done1.result.g2.matches, ["a.js"]);
 
     // 2) Pi bindings via update_catalog
     w.send({
