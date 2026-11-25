@@ -23,6 +23,7 @@ for (const key of Object.keys(process.env)) {
 // Prevent Node v26+ from crashing the persistent worker on un-awaited rejected tool promises.
 process.on("unhandledRejection", () => {});
 process.on("uncaughtException", (err) => {
+  clearAllHostTimers();
   if (activeExecId !== null && !execSettled) {
     execSettled = true;
     emit({
@@ -41,6 +42,16 @@ let vmApi = null;
 let activeExecId = null;
 let execSettled = true;
 let currentLogs = [];
+const hostTimers = new Map();
+const MAX_HOST_TIMERS = 256;
+const MAX_TIMER_MS = 300000;
+
+function clearAllHostTimers() {
+  for (const handle of hostTimers.values()) {
+    clearTimeout(handle);
+  }
+  hostTimers.clear();
+}
 
 function emit(obj) {
   try {
@@ -50,7 +61,7 @@ function emit(obj) {
   }
 }
 
-const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, hostLog) {
+const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, hostLog, hostSetTimer, hostClearTimer) {
   "use strict";
 
   // Capture pristine intrinsic references at startup so user code mutating globals cannot break the bridge.
@@ -61,7 +72,10 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
   const _Promise_reject = Promise.reject.bind(Promise);
   const _Function = Function;
   const _Error = Error;
+  const _TypeError = TypeError;
   const _String = String;
+  const _Number = Number;
+  const _Number_isFinite = Number.isFinite;
   const _Object_create = Object.create;
   const _Object_assign = Object.assign;
   const _Object_keys = Object.keys;
@@ -88,7 +102,9 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
   }
 
   const pending = new _Map();
+  const vmTimers = new _Map();
   let nextCallId = 1;
+  let nextTimerId = 1;
   let currentExecId = null;
   let toolMap = _Object_create(null); // jsName -> registryName
   let bindings = _Object_create(null);
@@ -362,6 +378,38 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
     error(...args) { hostLog("ERROR: " + args.map(formatArg).join(" ")); },
   };
 
+  function sandboxSetTimeout(fn, ms = 0, ...args) {
+    if (typeof fn !== "function") {
+      throw new _TypeError("setTimeout callback must be a function");
+    }
+    const capturedExecId = currentExecId;
+    if (capturedExecId === null) {
+      throw new _Error("no active execution");
+    }
+    const rawMs = _Number(ms);
+    const delayMs = _Number_isFinite(rawMs) && rawMs > 0 ? rawMs : 0;
+    const id = nextTimerId++;
+    _mapSet.call(vmTimers, id, { execId: capturedExecId, cb: () => fn(...args) });
+    if (!hostSetTimer(capturedExecId, id, delayMs)) {
+      _mapDelete.call(vmTimers, id);
+      throw new _Error("unable to schedule timer (limit reached or execution inactive)");
+    }
+    return id;
+  }
+
+  function sandboxClearTimeout(id) {
+    const numId = _Number(id);
+    if (!_Number_isFinite(numId)) return;
+    _mapDelete.call(vmTimers, numId);
+    hostClearTimer(numId);
+  }
+
+  function sleep(ms = 0) {
+    return new _Promise((resolve) => {
+      sandboxSetTimeout(() => resolve(), ms);
+    });
+  }
+
   globalThis.tools = toolsProxy;
   globalThis.$ = $;
   globalThis.read = read;
@@ -371,6 +419,9 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
   globalThis.glob = glob;
   globalThis.searchTools = searchTools;
   globalThis.describeTool = describeTool;
+  globalThis.sleep = sleep;
+  globalThis.setTimeout = sandboxSetTimeout;
+  globalThis.clearTimeout = sandboxClearTimeout;
   globalThis.console = sandboxConsole;
   globalThis.state = Object.create(null);
 
@@ -391,7 +442,25 @@ const VM_PRELUDE = `(function(hostSend, hostSearch, hostDescribe, hostHint, host
           _mapDelete.call(pending, callId);
         }
       }
+      for (const [timerId, entry] of _mapEntries.call(vmTimers)) {
+        if (entry.execId !== id) {
+          _mapDelete.call(vmTimers, timerId);
+        }
+      }
       currentExecId = id;
+    },
+    fireTimer(execId, timerId) {
+      const entry = _mapGet.call(vmTimers, timerId);
+      if (!entry) return;
+      _mapDelete.call(vmTimers, timerId);
+      if (execId !== currentExecId || entry.execId !== currentExecId) {
+        return;
+      }
+      try {
+        entry.cb();
+      } catch {
+        // Uncaught async timer callback errors must not crash the persistent worker.
+      }
     },
     deliver(replyJson) {
       const msg = _JSON_parse(replyJson);
@@ -501,13 +570,51 @@ function ensureContext() {
     }
   };
 
-  vmApi = initFn(hostSend, hostSearch, hostDescribe, hostHint, hostLog);
+  const hostSetTimer = (execId, timerId, ms) => {
+    try {
+      if (execId !== activeExecId || execSettled) return false;
+      if (hostTimers.size >= MAX_HOST_TIMERS) return false;
+      const id = Number(timerId);
+      if (!Number.isFinite(id)) return false;
+      const raw = Number(ms);
+      const delay = Number.isFinite(raw) ? Math.max(0, Math.min(raw, MAX_TIMER_MS)) : 0;
+      const handle = setTimeout(() => {
+        hostTimers.delete(id);
+        if (activeExecId !== execId || execSettled || !vmApi) return;
+        try {
+          vmApi.fireTimer(execId, id);
+        } catch {
+          // Never throw across realm boundary.
+        }
+      }, delay);
+      hostTimers.set(id, handle);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const hostClearTimer = (timerId) => {
+    try {
+      const id = Number(timerId);
+      const handle = hostTimers.get(id);
+      if (handle !== undefined) {
+        clearTimeout(handle);
+        hostTimers.delete(id);
+      }
+    } catch {
+      // Never throw across realm boundary.
+    }
+  };
+
+  vmApi = initFn(hostSend, hostSearch, hostDescribe, hostHint, hostLog, hostSetTimer, hostClearTimer);
 }
 
 function handleMessage(msg) {
   if (!msg || typeof msg !== "object") return;
   switch (msg.type) {
     case "init": {
+      clearAllHostTimers();
       catalog = new Catalog(Array.isArray(msg.tools) ? msg.tools : []);
       vmContext = null;
       vmApi = null;
@@ -532,6 +639,7 @@ function handleMessage(msg) {
       break;
     }
     case "exec": {
+      clearAllHostTimers();
       ensureContext();
       const execId = msg.exec_id;
       activeExecId = execId;
@@ -548,6 +656,7 @@ function handleMessage(msg) {
         try {
           if (activeExecId !== execId || execSettled) return;
           execSettled = true;
+          clearAllHostTimers();
           const parsed = JSON.parse(String(doneJson));
           const out = {
             type: "done",

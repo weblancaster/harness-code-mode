@@ -21,9 +21,10 @@ Skip Code Mode for a single straightforward tool call or anything needing user i
 
 | Helper | Behavior |
 | --- | --- |
-| `await tools.<name>(args)` | Calls any exposed MCP or built-in tool; throws on tool error |
+| `await tools.<name>(args)` | Calls any exposed MCP or built-in tool (MCP JSON payloads are auto-unwrapped); throws on tool error |
 | `searchTools(query, topK=5)` | Local BM25 search over exposed tools (`[{name, js, description, score}]`) |
 | `describeTool(name)` | Local schema lookup (`{ok, name, js, description, schema}`) |
+| `await sleep(ms)` / `setTimeout` / `clearTimeout` | Realm-isolated, execution-scoped timers for rate-limited API pacing |
 | `` await $`cmd ${arg}` `` | POSIX-quoted shell helper; chain `.cwd(dir)`, `.timeout(sec)`, `.nothrow()`, `.text()`, `.json()` |
 | `await read(path, opts)` | Reads a file; `.text` provides line-number-stripped content |
 | `await edit(path, oldStr, newStr, opts)` | Targeted find-and-replace edit |

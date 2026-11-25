@@ -445,3 +445,48 @@ test("worker handles null-prototype throws and global intrinsic tampering across
     await w.close();
   }
 });
+
+test("worker supports realm-isolated sleep/setTimeout/clearTimeout and cleans up stale timers", async () => {
+  const w = spawnWorker();
+  try {
+    await w.nextMsg();
+    w.send({ type: "init", tools: [], helperBindings: {} });
+
+    // sleep + setTimeout + clearTimeout + realm escape check
+    w.send({
+      type: "exec",
+      exec_id: 1,
+      code: `
+        const log = [];
+        const cancelled = setTimeout(() => log.push("should-not-run"), 15);
+        clearTimeout(cancelled);
+        const p = sleep(25);
+        await p;
+        log.push("after-sleep");
+        await new Promise((resolve) => setTimeout((v) => { log.push(v); resolve(); }, 10, "arg-ok"));
+        const escaped = [];
+        for (const [label, val] of [["sleepP", p], ["sleepFn", sleep], ["stFn", setTimeout], ["ctFn", clearTimeout]]) {
+          try {
+            const t = val.constructor.constructor("return typeof process")();
+            if (t !== "undefined") escaped.push(label + ":" + t);
+          } catch {}
+        }
+        // Schedule an un-awaited timer that must be cleared when exec 1 settles
+        setTimeout(() => { state.leaked = true; }, 40);
+        return { log, escaped };
+      `,
+    });
+    const d1 = await w.nextMsg(2000);
+    assert.equal(d1.ok, true, d1.error);
+    assert.deepEqual(d1.result, { log: ["after-sleep", "arg-ok"], escaped: [] });
+
+    // Wait longer than the 40ms orphan timer and verify it never fired into state
+    await new Promise((r) => setTimeout(r, 90));
+    w.send({ type: "exec", exec_id: 2, code: "return { leaked: Boolean(state.leaked) };" });
+    const d2 = await w.nextMsg(2000);
+    assert.equal(d2.ok, true, d2.error);
+    assert.deepEqual(d2.result, { leaked: false });
+  } finally {
+    await w.close();
+  }
+});

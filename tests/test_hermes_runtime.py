@@ -211,6 +211,64 @@ class TestHermesRuntime(unittest.TestCase):
         self.mgr.run(session_id="p3", code="return 3;", tools=[], dispatch_fn=lambda n, a: "{}")
         self.assertEqual(self.mgr.active_count(), 2)
 
+    def test_mcp_result_envelope_unwrapping_preserves_builtin_and_errors(self):
+        def dispatch(name, _args):
+            if name == "mcp__ld__get_flags":
+                return json.dumps({"result": json.dumps({"items": [{"key": "flag-a"}, {"key": "flag-b"}]})})
+            if name == "mcp__pd__structured":
+                return json.dumps({"result": "summary", "structuredContent": {"services": [{"id": "S1"}]}})
+            if name == "mcp__plain__ping":
+                return json.dumps({"result": "pong"})
+            if name == "mcp__err__fail":
+                return json.dumps({"error": "rate limited"})
+            if name == "read_file":
+                return json.dumps({"result": '{"not_unwrapped": true}'})
+            raise RuntimeError(f"unexpected {name}")
+
+        tools = [
+            {"name": n, "description": n, "schema": {}}
+            for n in (
+                "mcp__ld__get_flags",
+                "mcp__pd__structured",
+                "mcp__plain__ping",
+                "mcp__err__fail",
+                "read_file",
+            )
+        ]
+        out = self.mgr.run(
+            session_id="s-mcp-unwrap",
+            code="""
+                const [flags, structured, plain, errRes, builtin] = await Promise.all([
+                    tools.mcp__ld__get_flags({}),
+                    tools.mcp__pd__structured({}),
+                    tools.mcp__plain__ping({}),
+                    tools.mcp__err__fail({}),
+                    tools.read_file({}),
+                ]);
+                await sleep(15);
+                return {
+                    flagKeys: flags.items.map((f) => f.key),
+                    serviceId: structured.services[0].id,
+                    plain,
+                    errRes,
+                    builtinRawType: typeof builtin.result,
+                };
+            """,
+            tools=tools,
+            dispatch_fn=dispatch,
+        )
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(
+            out["result"],
+            {
+                "flagKeys": ["flag-a", "flag-b"],
+                "serviceId": "S1",
+                "plain": "pong",
+                "errRes": {"error": "rate limited"},
+                "builtinRawType": "string",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
