@@ -116,10 +116,10 @@ CODEMODE_SCHEMA = {
 
 _PROMPT_GUIDANCE = """## Code Mode (`codemode`)
 Use `codemode` when a task needs 3+ tool calls, parallel `Promise.all` fan-out, or filtering large MCP/file outputs before returning.
-When `tool_search` defers `codemode`, invoke it in one step without calling `tool_describe`:
+When `tool_search` defers `codemode`, invoke it in one step without calling `tool_describe` (skip outer `tool_describe` for MCP tools you will call inside `codemode` — call `describeTool(name)` inside your snippet instead):
 `tool_call(calls=[{"name": "codemode", "arguments": {"code": "<async JS body>", "timeout": 60, "reset": false}}])`
 Inside the async JS body:
-- `await tools.<name>(args)` — call any exposed MCP or built-in tool (use `Promise.all([...])` for parallelism)
+- `await tools.<name>(args)` — call any exposed MCP or built-in tool (MCP results are already unwrapped JSON; use `Promise.all([...])` for parallelism or `await sleep(ms)` for rate-limited APIs)
 - `searchTools(query, topK=5)` / `describeTool(name)` — discover tool schemas on demand (zero round-trip)
 - ``await $`cmd ${arg}`.cwd(dir).nothrow().text()`` — POSIX-quoted shell helper
 - `await read(path)` (`.text` strips `LINE_NUM|` prefixes), `await edit(path, old, new)`, `await write(path, content)`, `await grep(pat, opts)`, `await glob(pat, opts)`

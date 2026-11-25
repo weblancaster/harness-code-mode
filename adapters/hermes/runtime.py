@@ -103,13 +103,30 @@ def _truncate_result(result: Any, max_chars: int) -> tuple[Any, bool]:
     return f"{serialized[:limit]}\n...[truncated {len(serialized) - limit} chars]", True
 
 
-def _parse_dispatch_result(raw: Any) -> Any:
+def _parse_dispatch_result(raw: Any, tool_name: str = "") -> Any:
+    parsed = raw
     if isinstance(raw, str):
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except Exception:
             return raw
-    return raw
+    if tool_name.startswith("mcp__") and isinstance(parsed, dict):
+        # Hermes MCP handlers wrap CallToolResult as {"result": text_result}
+        # (and optionally "structuredContent" / "_meta"). Match core/mcp-client.js
+        # and adapters/pi/index.ts by returning structuredContent or JSON-parsed text.
+        if "error" in parsed and "result" not in parsed:
+            return parsed
+        if "structuredContent" in parsed and parsed["structuredContent"] is not None:
+            return parsed["structuredContent"]
+        if "result" in parsed and set(parsed.keys()) <= {"result", "_meta"}:
+            inner = parsed["result"]
+            if isinstance(inner, str):
+                try:
+                    return json.loads(inner)
+                except Exception:
+                    return inner
+            return inner
+    return parsed
 
 
 class CodemodeSession:
@@ -426,7 +443,7 @@ class CodemodeSession:
                                 "exec_id": exec_id,
                                 "id": call_id,
                                 "ok": True,
-                                "result": _parse_dispatch_result(raw_res),
+                                "result": _parse_dispatch_result(raw_res, tool_name),
                             })
                         except Exception as exc:
                             if settled.is_set():
