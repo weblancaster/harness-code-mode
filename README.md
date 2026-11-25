@@ -15,6 +15,18 @@ const bodies = await Promise.all(
 return { count: bodies.length, totalChars: bodies.reduce((s, b) => s + b.body.length, 0) };
 ```
 
+## Measured Impact (Hermes A/B Benchmark)
+
+Isolated before vs. after runs on **Hermes Agent** (`claude-opus-5-5`, identical 45 live LaunchDarkly + PagerDuty MCP tools, zero prompt hints to use `codemode`):
+
+| Workload | Baseline (no plugin) | With `code-mode` | Delta |
+| --- | --- | --- | --- |
+| **8-flag MCP fan-out** (LaunchDarkly) | 42.6s · 4 turns · 11 tool calls · 135.0k prompt tok · 26.6k tool chars | **29.9s · 3 turns · 2 tool calls · 87.2k prompt tok · 6.9k tool chars** | **-30% faster**, **-35% prompt tokens**, **-74% context payload**, **-82% tool calls** |
+| **Multi-tool MCP cross-ref** (PagerDuty) | 39.3s · 5 turns · 12 tool calls · 180.9k prompt tok · 36.6k tool chars | **35.8s · 4 turns · 3 tool calls · 125.3k prompt tok · 12.1k tool chars** | **-9% faster**, **-31% prompt tokens**, **-67% context payload**, **-75% tool calls** |
+| **Single-file read** (negative control) | 4.4s · 2 turns · 1 tool call · 55.0k prompt tok | 4.8s · 2 turns · 1 tool call · 56.0k prompt tok | Zero false triggers; ~1.4 KB fixed prompt overhead |
+
+**Where it wins most:** multi-hop MCP fan-out and filtering over bulky JSON payloads, where intermediate responses stay inside the Node.js sandbox instead of entering the model context window. On simple single-tool reads, the model skips `codemode` cleanly with negligible overhead.
+
 ## Install per Harness
 
 Requires **Node.js `>=22`** (Node `>=25` / Hermes-bundled Node `v26` recommended for OS-level network denial under `--permission`).
@@ -79,9 +91,10 @@ Optional local coding helpers (`$`, `read`, `edit`, `write`, `grep`, `glob`) are
 
 | In JS | Behavior |
 | --- | --- |
-| `await tools.<name>(args)` | Calls any exposed MCP or built-in tool; throws catchable JS Error on failure |
+| `await tools.<name>(args)` | Calls any exposed MCP or built-in tool (MCP JSON payloads are auto-unwrapped); throws catchable JS Error on failure |
 | `searchTools(query, topK=5)` | Local BM25 search (`[{name, js, description, score}]`), zero IPC round-trip |
 | `describeTool(name)` | Local JSON Schema lookup (`{ok, name, js, description, schema}`) |
+| `await sleep(ms)` / `setTimeout` / `clearTimeout` | Realm-isolated, execution-scoped timers for rate-limited API pacing (auto-cleared on completion) |
 | `` await $`cmd ${arg}` `` | POSIX single-quoted shell helper; supports `.cwd(dir)`, `.timeout(sec)`, `.nothrow()`, `.text()`, `.json()` |
 | `await read(path, opts?)` | Reads a file (`.text` strips Hermes `LINE_NUM\|` prefixes; `.content` preserves raw output) |
 | `await edit(path, old, new, opts?)` | Targeted find-and-replace edit |
